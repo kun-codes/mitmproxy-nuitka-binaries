@@ -1,0 +1,60 @@
+name: Check mitmproxy Latest Release
+
+on:
+    schedule:
+        -   cron: '0 * * * *'  # Run every hour
+    workflow_dispatch:
+
+jobs:
+    check-release:
+        runs-on: ubuntu-latest
+        steps:
+            -   name: Checkout repository
+                uses: actions/checkout@v4
+
+            -   name: Get latest mitmproxy release
+                id: get_latest_release
+                uses: octokit/request-action@v2.x
+                with:
+                    route: GET /repos/{owner}/{repo}/releases/latest
+                    owner: mitmproxy
+                    repo: mitmproxy
+                env:
+                    GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+            -   name: Set latest version as env variable
+                run: |
+                    # Parse the JSON response to get just the tag_name and remove the 'v' prefix
+                    MITMPROXY_LATEST_VERSION=$(echo '${{ steps.get_latest_release.outputs.data }}' | jq -r '.tag_name' | sed 's/^v//')
+                    echo "MITMPROXY_LATEST_VERSION=$MITMPROXY_LATEST_VERSION" >> $GITHUB_ENV
+                    echo "Latest mitmproxy version: $MITMPROXY_LATEST_VERSION"
+
+            -   name: Check current mitmproxy binary version
+                run: |
+                    # Check if latest-binary-version.txt exists and is not empty
+                    if [ -f "latest-binary-version.txt" ] && [ -s "latest-binary-version.txt" ]; then
+                        MITMPROXY_CURRENT_VERSION=$(cat latest-binary-version.txt)
+                    else
+                        # If file doesn't exist or is empty, set version to 0.0.0
+                        MITMPROXY_CURRENT_VERSION="0.0.0"
+                    fi
+                    echo "MITMPROXY_CURRENT_VERSION=$MITMPROXY_CURRENT_VERSION" >> $GITHUB_ENV
+                    echo "Current mitmproxy version: $MITMPROXY_CURRENT_VERSION"
+
+            -   name: Compare versions
+                run: |
+                    if [ "$MITMPROXY_LATEST_VERSION" != "$MITMPROXY_CURRENT_VERSION" ]; then
+                        echo "Versions are different. Triggering build."
+                        echo "BUILD_REQUIRED=true" >> $GITHUB_ENV
+                    else
+                        echo "Versions are the same. No build required."
+                        echo "BUILD_REQUIRED=false" >> $GITHUB_ENV
+                    fi
+
+            -   name: Trigger build workflow
+                if: env.BUILD_REQUIRED == 'true'
+                uses: peter-evans/repository-dispatch@v3
+                with:
+                    token: ${{ secrets.PAT }}
+                    event-type: trigger-release
+
