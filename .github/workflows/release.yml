@@ -1,0 +1,305 @@
+name: Build & Release mitmproxy Binaries
+
+on:
+    repository_dispatch:
+        types: [ trigger-release ]
+
+jobs:
+    build:
+        runs-on: ${{ matrix.os }}
+        strategy:
+            fail-fast: false
+            matrix:
+                os: [ macos-latest, macos-13 ]
+                binary: [ mitmproxy, mitmdump ]
+
+        steps:
+            -   name: Get latest mitmproxy release
+                id: get_latest_release
+                uses: octokit/request-action@v2.x
+                with:
+                    route: GET /repos/{owner}/{repo}/releases/latest
+                    owner: mitmproxy
+                    repo: mitmproxy
+                env:
+                    GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+            -   name: Set latest version as env variable
+                run: |
+                    # Parse the JSON response to get just the tag_name and remove the 'v' prefix
+                    MITMPROXY_LATEST_VERSION=$(echo '${{ steps.get_latest_release.outputs.data }}' | jq -r '.tag_name' | sed 's/^v//')
+                    echo "MITMPROXY_LATEST_VERSION=$MITMPROXY_LATEST_VERSION" >> $GITHUB_ENV
+                    echo "Latest mitmproxy version: $MITMPROXY_LATEST_VERSION"
+
+            -   name: Store Architecture
+                run: |
+                    ARCHITECTURE=$(uname -m)
+                    echo "ARCHITECTURE=$ARCHITECTURE" >> $GITHUB_ENV
+
+            -   name: Checkout mitmproxy repository
+                uses: actions/checkout@v4
+                with:
+                    repository: mitmproxy/mitmproxy
+                    ref: v${{ env.MITMPROXY_LATEST_VERSION }}
+                    fetch-depth: '0'  # Fetch all history for accurate last modified date checks else it
+                    # will show unix time stamp of last release after checkout
+
+            -   name: Compare last modified date of standalone.spec
+                run: |
+                    # Get the last commit date for standalone.spec from git
+                    SPEC_MODIFIED=$(git log -1 --format=%ct "./release/specs/standalone.spec" 2>/dev/null || echo "0")
+                    echo "SPEC_MODIFIED timestamp: $SPEC_MODIFIED"
+                    
+                    # Check last-run-date.txt from the original repository
+                    cd $GITHUB_WORKSPACE
+                    
+                    if [ -f "last-run-date.txt" ]; then
+                        LAST_RUN_DATE=$(cat last-run-date.txt)
+                        echo "LAST_RUN_DATE timestamp: $LAST_RUN_DATE"
+                        
+                        if [ "$SPEC_MODIFIED" -gt "$LAST_RUN_DATE" ]; then
+                            echo "Error: ./release/specs/standalone.spec was modified. Manual intervention is required."
+                            exit 1
+                        else
+                            echo "standalone.spec has not been modified since last run. Continuing workflow."
+                        fi
+                    else
+                        echo "last-run-date.txt does not exist. Continuing workflow."
+                    fi
+
+            -   name: Check if .python-version file exists
+                id: check_python_version
+                run: |
+                    if [ ! -f ".python-version" ]; then
+                        echo "Error: .python-version file not found in the repository."
+                        exit 1
+                    fi
+
+            # will use the python version specified in .python-version file
+            -   name: Setup Python
+                uses: actions/setup-python@v5
+
+            # equivalent of: https://github.com/Nuitka/Nuitka-Action/issues/55#issuecomment-2346139088
+            -   name: Install dependencies
+                env:
+                    UV_SYSTEM_PYTHON: 1
+                # https://github.com/astral-sh/uv/issues/9067#issuecomment-2471265823
+                run: |
+                    python -m pip install --upgrade pip
+                    python -m pip install uv
+                    uv pip install -e .
+
+            -   name: Debug Packages
+                run: |
+                    pip list
+                    uv pip list
+
+            # as per: https://github.com/mitmproxy/mitmproxy/blob/main/release/specs/standalone.spec
+            -   name: Build mitmproxy binary using nuitka
+                uses: Nuitka/Nuitka-Action@main
+                if: matrix.binary == 'mitmproxy'
+                with:
+                    nuitka-version: 'main'
+                    script-name: './release/specs/mitmproxy'
+                    mode: 'onefile'
+                    macos-app-version: ${{ env.MITMPROXY_LATEST_VERSION }}
+                    product-version: ${{ env.MITMPROXY_LATEST_VERSION }}
+                    file-version: ${{ env.MITMPROXY_LATEST_VERSION }}
+                    output-file: 'mitmproxy'
+                    nofollow-import-to: |
+                        mitmproxy.tools.web
+
+            -   name: Build mitmdump binary using nuitka
+                uses: Nuitka/Nuitka-Action@main
+                if: matrix.binary == 'mitmdump'
+                with:
+                    nuitka-version: 'main'
+                    script-name: './release/specs/mitmdump'
+                    mode: 'onefile'
+                    macos-app-version: ${{ env.MITMPROXY_LATEST_VERSION }}
+                    product-version: ${{ env.MITMPROXY_LATEST_VERSION }}
+                    file-version: ${{ env.MITMPROXY_LATEST_VERSION }}
+                    output-file: 'mitmdump'
+                    nofollow-import-to: |
+                        mitmproxy.tools.web
+                        mitmproxy.tools.console
+                    python-flag: |
+                        unbuffered
+
+            -   name: Upload artifact
+                uses: actions/upload-artifact@v4
+                with:
+                    name: ${{ matrix.binary }}-macos-${{ env.ARCHITECTURE }}-${{ env.MITMPROXY_LATEST_VERSION }}
+                    path: 'build/${{ matrix.binary }}'
+
+    update-latest-version:
+        needs: build
+        runs-on: ubuntu-latest
+
+        permissions:
+            contents: write  # Allow the workflow to push changes to the repository
+
+        steps:
+            -   name: Checkout current repository
+                uses: actions/checkout@v4
+
+            -   name: Get latest mitmproxy release
+                id: get_latest_release
+                uses: octokit/request-action@v2.x
+                with:
+                    route: GET /repos/{owner}/{repo}/releases/latest
+                    owner: mitmproxy
+                    repo: mitmproxy
+                env:
+                    GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+            -   name: Set latest version as env variable
+                run: |
+                    # Parse the JSON response to get just the tag_name and remove the 'v' prefix
+                    MITMPROXY_LATEST_VERSION=$(echo '${{ steps.get_latest_release.outputs.data }}' | jq -r '.tag_name' | sed 's/^v//')
+                    echo "MITMPROXY_LATEST_VERSION=$MITMPROXY_LATEST_VERSION" >> $GITHUB_ENV
+                    echo "Latest mitmproxy version: $MITMPROXY_LATEST_VERSION"
+
+            -   name: Update versions.txt
+                run: |
+                    echo "${{ env.MITMPROXY_LATEST_VERSION }}" > latest-binary-version.txt
+
+            -   name: Commit and push version changes
+                uses: stefanzweifel/git-auto-commit-action@v5
+                with:
+                    commit_message: "bot: update mitmproxy version to ${{ env.MITMPROXY_LATEST_VERSION }}"
+                    file_pattern: 'latest-binary-version.txt'
+                    branch: ${{ github.ref }}
+
+            # to prevent errors during git push in next job
+            -   name: Sleep before next job
+                run: sleep 15
+
+    update-last-run-date:
+        needs: update-latest-version
+        runs-on: ubuntu-latest
+        outputs:
+            update_status: ${{ steps.commit_date.outputs.status }}
+
+        permissions:
+            contents: write  # Allow the workflow to push changes to the repository
+
+        steps:
+            -   name: Checkout current repository
+                uses: actions/checkout@v4
+                with:
+                    ref: ${{ github.ref }}
+                    fetch-depth: 0
+
+            -   name: Pull latest changes
+                run: |
+                    git fetch origin
+                    git reset --hard origin/$(echo ${{ github.ref }} | sed 's/refs\/heads\///')
+                    git pull origin $(echo ${{ github.ref }} | sed 's/refs\/heads\///')
+
+            -   name: Update last run date
+                run: |
+                    date +%s > last-run-date.txt
+
+            -   name: Commit and push last run date
+                id: commit_date
+                uses: stefanzweifel/git-auto-commit-action@v5
+                with:
+                    commit_message: "bot: update last run date"
+                    file_pattern: 'last-run-date.txt'
+                    branch: ${{ github.ref }}
+
+            -   name: Revert version update commit if date commit fails
+                if: failure()
+                run: |
+                    echo "Last run date update failed. Reverting previous version update commit..."
+                    git fetch origin
+                    git reset --hard HEAD~1
+                    git push --force origin $(echo ${{ github.ref }} | sed 's/refs\/heads\///')
+                    echo "Removed the last commit due to failure."
+                    exit 1
+
+            -   name: Sleep before next job
+                if: success()
+                run: sleep 15
+
+    release:
+        needs: update-last-run-date
+        if: needs.update-last-run-date.result == 'success'
+        runs-on: ubuntu-latest
+        outputs:
+            release_status: ${{ steps.create_release.outputs.status }}
+
+        permissions:
+            contents: write  # Allow the workflow to create releases
+
+        steps:
+            -   name: Checkout current repository
+                uses: actions/checkout@v4
+                with:
+                    ref: ${{ github.ref }}
+                    fetch-depth: 0
+
+            -   name: Set latest version as env variable
+                run: |
+                    MITMPROXY_LATEST_VERSION=$(cat latest-binary-version.txt)
+                    echo "MITMPROXY_LATEST_VERSION=$MITMPROXY_LATEST_VERSION" >> $GITHUB_ENV
+                    echo "Using version: $MITMPROXY_LATEST_VERSION"
+
+            -   name: Download all build artifacts
+                uses: actions/download-artifact@v4
+                with:
+                    path: artifacts
+
+            -   name: List downloaded artifacts
+                run: ls -R artifacts
+
+            -   name: Create archives of artifacts
+                working-directory: artifacts
+                run: |
+                    for dir in */; do
+                      dirname=${dir%/}
+                      zip -r "${dirname}.zip" "$dirname"
+                      echo "Created archive: ${dirname}.zip"
+                    done
+                    ls -la *.zip
+
+            -   name: Create GitHub Release
+                id: create_release
+                env:
+                    GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+                working-directory: artifacts
+                run: |
+                    if gh release create "v${MITMPROXY_LATEST_VERSION}" \
+                      *.zip \
+                      --title "mitmproxy v${MITMPROXY_LATEST_VERSION}" \
+                      --notes "Automated release of mitmproxy binaries for macOS." \
+                      --latest; then
+                      echo "status=success" >> $GITHUB_OUTPUT
+                    else
+                      echo "status=failure" >> $GITHUB_OUTPUT
+                      exit 1
+                    fi
+
+    cleanup-on-release-failure:
+        needs: release
+        if: needs.release.outputs.release_status == 'failure' || failure()
+        runs-on: ubuntu-latest
+
+        permissions:
+            contents: write  # Allow the workflow to push changes to the repository
+
+        steps:
+            -   name: Checkout current repository
+                uses: actions/checkout@v4
+                with:
+                    ref: ${{ github.ref }}
+                    fetch-depth: 0
+
+            -   name: Revert last two commits
+                run: |
+                    echo "Release creation failed. Cleaning up commits..."
+                    # Revert the last two commits (last-run-date and version update)
+                    git reset --hard HEAD~2
+                    git push --force origin $(echo ${{ github.ref }} | sed 's/refs\/heads\///')
+                    echo "Removed the last two commits due to release failure."
