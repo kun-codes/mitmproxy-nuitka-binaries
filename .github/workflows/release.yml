@@ -100,6 +100,7 @@ jobs:
                 if: matrix.binary == 'mitmproxy'
                 with:
                     nuitka-version: 'main'
+                    caching-key: ${{ matrix.binary }}
                     script-name: './release/specs/mitmproxy'
                     mode: 'onefile'
                     macos-app-version: ${{ env.MITMPROXY_LATEST_VERSION }}
@@ -114,6 +115,7 @@ jobs:
                 if: matrix.binary == 'mitmdump'
                 with:
                     nuitka-version: 'main'
+                    caching-key: ${{ matrix.binary }}
                     script-name: './release/specs/mitmdump'
                     mode: 'onefile'
                     macos-app-version: ${{ env.MITMPROXY_LATEST_VERSION }}
